@@ -1,0 +1,61 @@
+#cloud-config
+
+## This works with CentOS 7, substitute your own cloud-config file
+## Use terraform templating as desired
+
+fqdn: ${hostname}
+package_update: true
+package_upgrade: true
+packages:
+- nvme-cli
+# - https://s3.${region}.amazonaws.com/amazoncloudwatch-agent-${region}/centos/amd64/latest/amazon-cloudwatch-agent.rpm
+package_reboot_if_required: true
+users:
+- default
+ssh_authorized_keys:
+  - "ssh-rsa <YOUR_KEY> <USER@HOST>"
+write_files:
+- path: /usr/sbin/nvme-device-name
+  permissions: "0755"
+  content: |-
+    #!/bin/bash
+
+    device=$1
+
+    # To be used with a udev rule to generate ec2 configured device names for nvme
+    # devices
+
+    if [[ -z nvme ]]; then
+      echo "ERROR: NVME tools not installed." >> /dev/stderr
+      exit 1
+    fi
+
+    if [[ ! -b "$device" ]]; then
+      echo "ERROR: cannot find block device $device" >> /dev/stderr
+      exit 1
+    fi
+
+    # capture 32 bytes at an offset of 3072 bytes from the raw-binary data
+    # not all block devices are extracted with /dev/ prefix
+    # use `xvd` prefix instead of `sd`
+    # remove all trailing space
+    dev_name=$(/usr/sbin/nvme id-ctrl -b "$device" | \
+      cut -b 3073- | \
+      tr -d '[:space:]' | \
+      cut -d ':' -f1 | \
+      sed 's_^/dev/__g')
+
+    # for some reason we have to echo the output here. Something to do with the
+    # pipeline's exit code or the state of stdout.
+    echo $dev_name
+- path: /etc/udev/rules.d/99-ec2-nvme-device-names.rules
+  permissions: "0644"
+  defer: true
+  content: |-
+    # Stolen from Amazon Linux, but modified to work with nvme-cli instead of ebsnvme
+
+    # ebs nvme devices
+    KERNEL=="nvme[0-9]*n[0-9]*", SUBSYSTEM=="block", ATTRS{model}=="Amazon Elastic Block Store",  PROGRAM+="/usr/sbin/nvme-device-name /dev/%k", SYMLINK+="%c"
+
+    # ephemeral nvme devices
+    KERNEL=="nvme[0-9]*n[0-9]*", SUBSYSTEM=="block", ATTRS{model}=="Amazon EC2 NVMe Instance Storage", PROGRAM+="/usr/sbin/nvme-device-name /dev/%k", SYMLINK+="%c"
